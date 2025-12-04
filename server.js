@@ -1,20 +1,17 @@
 const WebSocket = require('ws');
 
-// Sunucuyu başlat
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("BUZ Telsiz Sunucusu (Sabit Bağlantı) Çalışıyor...");
+console.log("🔍 DETAYLI LOG SUNUCUSU ÇALIŞIYOR...");
 
+// Kullanıcı Listesi
 let users = {};
 
 wss.on('connection', function connection(ws) {
   
-  // Kalp atışı (Heartbeat) - Sadece log için, bağlantıyı kesmez.
+  // Bağlantı kopmasın diye kalp atışı
   ws.isAlive = true;
-  ws.on('pong', () => { 
-      ws.isAlive = true; 
-      // console.log("Pong alındı: " + ws.userId); // İsterseniz açabilirsiniz
-  });
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', function incoming(message) {
     let data;
@@ -22,38 +19,60 @@ wss.on('connection', function connection(ws) {
         data = JSON.parse(message);
     } catch (e) { return; }
 
-    // 1. GİRİŞ
+    // --- GİRİŞ (LOGIN) ---
     if (data.type === 'login') {
-        users[data.userId] = ws;
-        ws.userId = data.userId;
-        console.log("✅ GİRİŞ: " + data.userId);
+        // ID'leri temizle (Boşlukları sil)
+        const cleanId = data.userId.trim();
+        users[cleanId] = ws;
+        ws.userId = cleanId;
+        
+        console.log("✅ GİRİŞ YAPILDI: [" + cleanId + "]");
+        printOnlineUsers(); // Listeyi ekrana bas
     } 
     
-    // 2. SES DOSYASI
+    // --- SES GÖNDERİMİ ---
     else if (data.type === 'audio_msg') {
-        console.log("📨 SES: " + data.from + " -> " + data.to);
-        const targetClient = users[data.to];
+        const targetId = data.to.trim();
+        console.log("📨 MESAJ İSTEĞİ: [" + data.from + "] --> [" + targetId + "]");
+        
+        const targetClient = users[targetId];
+        
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
             targetClient.send(message);
-            console.log("🚀 İLETİLDİ.");
+            console.log("🚀 BAŞARILI: Paket hedefe teslim edildi.");
         } else {
-            console.log("⛔ HEDEF BULUNAMADI: " + data.to);
+            console.log("⛔ HATA: Hedef [" + targetId + "] bulunamadı!");
+            console.log("   👉 İPUCU: Hedef telefonun interneti kopmuş veya ID yanlış.");
+            printOnlineUsers(); // Kimlerin online olduğunu göster ki hatanı anla
         }
     }
     
-    // 3. PING (Android'den gelen "Ben buradayım" mesajı)
+    // --- PING ---
     else if (data.type === 'ping') {
-        // Boş cevap, sadece bağlantı kopmasın diye
+        // Pingleri loglayıp ekranı kirletmeyelim
     }
   });
 
   ws.on('close', function() {
       if (ws.userId) {
           delete users[ws.userId];
-          console.log("🔻 ÇIKIŞ: " + ws.userId);
+          console.log("🔻 KOPTU: [" + ws.userId + "]");
       }
   });
 });
 
-// Otomatik atma kodunu kaldırdık. 
-// Sunucu artık pasif duran kullanıcıları atmaz.
+// Yardımcı Fonksiyon: Online Listesini Yazdır
+function printOnlineUsers() {
+    const onlineList = Object.keys(users);
+    console.log("📋 ŞU AN ONLİNE OLANLAR (" + onlineList.length + "): " + onlineList.join(", "));
+    console.log("------------------------------------------------");
+}
+
+// 30 saniyede bir ölü bağlantıları temizle
+setInterval(function ping() {
+  wss.clients.forEach(function each(ws) {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
