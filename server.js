@@ -1,67 +1,82 @@
 const WebSocket = require('ws');
 
+// Sunucuyu başlat
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("BUZ Sunucusu Başlatıldı (Debug Modu)...");
+console.log("BUZ Telsiz Sunucusu (v2.0) Çalışıyor...");
 
-// Kullanıcıları sakladığımız obje
 let users = {};
 
 wss.on('connection', function connection(ws) {
   
+  // Bağlantı canlı mı kontrolü (Ping/Pong)
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   ws.on('message', function incoming(message) {
     let data;
     try {
+        // Gelen mesajı oku
         data = JSON.parse(message);
     } catch (e) {
-        console.log("❌ HATA: Gelen veri JSON değil!");
-        return;
+        console.log("⚠️ HATA: Geçersiz veri formatı geldi, yoksayılıyor.");
+        return; // Hata varsa sunucuyu çökertme, sadece çık.
     }
 
     // 1. GİRİŞ (LOGIN)
     if (data.type === 'login') {
         users[data.userId] = ws;
         ws.userId = data.userId;
-        
-        console.log("✅ GİRİŞ: " + data.userId + " bağlandı.");
-        console.log("📊 Şu an Online Olanlar: " + Object.keys(users).join(", "));
+        console.log("✅ GİRİŞ: " + data.userId);
     } 
     
-    // 2. SES DOSYASI İLETİMİ
+    // 2. SES DOSYASI İLETİMİ (Base64)
     else if (data.type === 'audio_msg') {
-        console.log("------------------------------------------------");
-        console.log("📨 SES PAKETİ GELDİ: Gönderen " + data.from + " -> Hedef " + data.to);
-        
         const targetClient = users[data.to];
         
+        console.log("📨 SES PAKETİ: " + data.from + " -> " + data.to);
+
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-            targetClient.send(message);
-            console.log("🚀 BAŞARILI: Ses dosyası " + data.to + " kullanıcısına iletildi.");
+            targetClient.send(message); // Mesajı aynen ilet
+            console.log("🚀 İLETİLDİ.");
         } else {
-            console.log("⛔ HATA: Hedef kullanıcı (" + data.to + ") bulunamadı veya çevrimdışı!");
-            console.log("🔍 İPUCU: Hedefin ID'si listede var mı? -> " + Object.keys(users).join(", "));
+            console.log("⛔ HEDEF BULUNAMADI: " + data.to);
         }
-        console.log("------------------------------------------------");
     }
 
-    // 3. DİĞER SİNYALLER (Offer/Answer)
+    // 3. WEBRTC SİNYALLERİ (Hala desteklesin)
     else if (['offer', 'answer', 'candidate'].includes(data.type)) {
         const targetClient = users[data.to];
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
             targetClient.send(message);
-            // Sinyal loglarını kalabalık etmemek için yazmıyoruz
         }
     }
-});
+  });
 
+  // Kullanıcı ayrılınca
   ws.on('close', function() {
       if (ws.userId) {
           delete users[ws.userId];
-          console.log("🔻 ÇIKIŞ: " + ws.userId + " ayrıldı.");
+          console.log("🔻 ÇIKIŞ: " + ws.userId);
       }
   });
-  
+
+  // Hata yakalama (Sunucunun kapanmaması için)
   ws.on('error', function(error) {
-      console.log("⚠️ HATA: Socket hatası: " + error);
+      console.log("⚠️ SOCKET HATASI: " + error);
   });
+});
+
+// -- BAĞLANTIYI CANLI TUTMA (KEEP-ALIVE) --
+// Render.com gibi yerlerde bağlantı kopmaması için her 30 saniyede bir kontrol
+const interval = setInterval(function ping() {
+  wss.clients.forEach(function each(ws) {
+    if (ws.isAlive === false) return ws.terminate();
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000);
+
+wss.on('close', function close() {
+  clearInterval(interval);
 });
