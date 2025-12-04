@@ -1,14 +1,12 @@
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("🔥 BUZ Grup Telsiz Sunucusu Çalışıyor...");
+console.log("🔍 DETAYLI GRUP TELSİZ SUNUCUSU ÇALIŞIYOR...");
 
-// Kullanıcılar ve Gruplar
-let users = {}; // { "USER_ID": ws }
-let groups = {}; // { "GRUP_ADI": ["USER_ID_1", "USER_ID_2"] }
+let users = {}; // { USER_ID: ws }
+let groups = {}; // { GRUP_ADI: [USER_ID_1, USER_ID_2] }
 
 wss.on('connection', function connection(ws) {
-  
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -16,80 +14,81 @@ wss.on('connection', function connection(ws) {
     let data;
     try { data = JSON.parse(message); } catch (e) { return; }
 
-    // 1. GİRİŞ (LOGIN)
+    // --- 1. GİRİŞ ---
     if (data.type === 'login') {
         const userId = data.userId.trim().toUpperCase();
         users[userId] = ws;
         ws.userId = userId;
-        console.log("✅ GİRİŞ: " + userId);
+        console.log("✅ GİRİŞ: [" + userId + "]");
     } 
     
-    // 2. GRUBA KATILMA (YENİ ÖZELLİK)
+    // --- 2. KANALA GİRİŞ (KRİTİK NOKTA) ---
     else if (data.type === 'join_group') {
         const userId = data.userId.trim().toUpperCase();
         const groupName = data.groupName.trim().toUpperCase();
         
-        // Eğer grup yoksa oluştur
-        if (!groups[groupName]) {
-            groups[groupName] = [];
-        }
+        if (!groups[groupName]) groups[groupName] = [];
         
-        // Kullanıcı zaten grupta değilse ekle
+        // Kullanıcıyı listeye ekle (Eğer yoksa)
         if (!groups[groupName].includes(userId)) {
             groups[groupName].push(userId);
         }
+        ws.currentGroup = groupName; // Kullanıcının bulunduğu odayı kaydet
         
-        // Kullanıcının aktif grubunu socket'e kaydet
-        ws.currentGroup = groupName;
-        
-        console.log("📢 GRUP: [" + userId + "] --> [" + groupName + "] kanalına katıldı.");
-        console.log("   👥 Gruptakiler: " + groups[groupName].join(", "));
+        console.log("➕ GRUP: [" + userId + "] --> [" + groupName + "] kanalına girdi.");
+        console.log("   📊 [" + groupName + "] Üyeleri: " + groups[groupName].join(", "));
     }
 
-    // 3. SES GÖNDERİMİ (HERKESE DAĞIT)
+    // --- 3. SES DAĞITIMI ---
     else if (data.type === 'audio_msg') {
-        const groupName = data.to.trim().toUpperCase(); // Hedef artık bir Grup Adı
+        // Android'den gelen veride 'to' kısmı GRUP ADI olmalı
+        const groupName = data.to ? data.to.trim().toUpperCase() : null;
         const senderId = data.from.trim().toUpperCase();
         
-        console.log("aaa SES YAYINI: [" + groupName + "] kanalına...");
+        console.log("------------------------------------------------");
+        console.log("🎤 SES YAYINI İSTEĞİ: [" + senderId + "] --> Kanal: [" + groupName + "]");
 
-        if (groups[groupName]) {
-            // Gruptaki herkesi döngüye al
-            groups[groupName].forEach(memberId => {
-                // Gönderen kişinin kendisine geri yollama!
+        if (groupName && groups[groupName]) {
+            const members = groups[groupName];
+            console.log("   👥 Gruptaki Kişiler: " + members.join(", "));
+            
+            let sentCount = 0;
+            members.forEach(memberId => {
+                // Kendine gönderme, diğerlerine gönder
                 if (memberId !== senderId) {
                     const targetClient = users[memberId];
                     if (targetClient && targetClient.readyState === WebSocket.OPEN) {
                         targetClient.send(message);
+                        sentCount++;
                     }
                 }
             });
-            console.log("🚀 YAYIN YAPILDI (" + (groups[groupName].length - 1) + " kişiye).");
+            
+            if (sentCount > 0) {
+                console.log("🚀 BAŞARILI: Ses " + sentCount + " kişiye gönderildi.");
+            } else {
+                console.log("⚠️ UYARI: Grupta senden başka kimse yok veya diğerleri çevrimdışı!");
+            }
         } else {
-            console.log("⛔ GRUP BULUNAMADIveya BOŞ.");
+            console.log("⛔ HATA: Böyle bir grup yok veya boş! (" + groupName + ")");
         }
+        console.log("------------------------------------------------");
     }
-    
-    // 4. PING
-    else if (data.type === 'ping') { }
   });
 
-  // KOPMA DURUMU
+  // --- KOPMA ---
   ws.on('close', function() {
       if (ws.userId) {
-          // Kullanıcıyı genel listeden sil
           delete users[ws.userId];
-          
-          // Kullanıcıyı bulunduğu gruptan da çıkar
-          if (ws.currentGroup && groups[ws.currentGroup]) {
-              groups[ws.currentGroup] = groups[ws.currentGroup].filter(id => id !== ws.userId);
+          // Gruplardan da çıkar
+          for (const group in groups) {
+              groups[group] = groups[group].filter(id => id !== ws.userId);
           }
           console.log("🔻 ÇIKIŞ: " + ws.userId);
       }
   });
 });
 
-// Keep-Alive
 setInterval(function ping() {
   wss.clients.forEach(function each(ws) {
     if (ws.isAlive === false) return ws.terminate();
