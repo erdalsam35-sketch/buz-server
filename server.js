@@ -1,10 +1,10 @@
 const WebSocket = require('ws');
 
-// Sunucuyu 8080 portunda başlat
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("BUZ Sinyalleşme ve Ses Sunucusu çalışıyor...");
+console.log("BUZ Sunucusu Başlatıldı (Debug Modu)...");
 
+// Kullanıcıları sakladığımız obje
 let users = {};
 
 wss.on('connection', function connection(ws) {
@@ -14,44 +14,54 @@ wss.on('connection', function connection(ws) {
     try {
         data = JSON.parse(message);
     } catch (e) {
-        console.log("Hatalı JSON");
+        console.log("❌ HATA: Gelen veri JSON değil!");
         return;
     }
 
     // 1. GİRİŞ (LOGIN)
     if (data.type === 'login') {
-        console.log("Kullanıcı Girdi: " + data.userId);
         users[data.userId] = ws;
         ws.userId = data.userId;
+        
+        console.log("✅ GİRİŞ: " + data.userId + " bağlandı.");
+        console.log("📊 Şu an Online Olanlar: " + Object.keys(users).join(", "));
     } 
     
-    // 2. SES DOSYASI İLETİMİ (YENİ EKLENEN KISIM)
+    // 2. SES DOSYASI İLETİMİ
     else if (data.type === 'audio_msg') {
-        console.log("SES Dosyası Gönderiliyor -> " + data.to);
+        console.log("------------------------------------------------");
+        console.log("📨 SES PAKETİ GELDİ: Gönderen " + data.from + " -> Hedef " + data.to);
         
         const targetClient = users[data.to];
         
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-            // Mesajı (Ses verisini) olduğu gibi hedefe ilet
-            targetClient.send(message); 
+            targetClient.send(message);
+            console.log("🚀 BAŞARILI: Ses dosyası " + data.to + " kullanıcısına iletildi.");
         } else {
-            console.log("Hedef bulunamadı: " + data.to);
+            console.log("⛔ HATA: Hedef kullanıcı (" + data.to + ") bulunamadı veya çevrimdışı!");
+            console.log("🔍 İPUCU: Hedefin ID'si listede var mı? -> " + Object.keys(users).join(", "));
         }
+        console.log("------------------------------------------------");
     }
 
-    // 3. DİĞER SİNYALLER (Eski WebRTC sinyalleri kalsın, zararı yok)
-    else if (data.type === 'offer' || data.type === 'answer' || data.type === 'candidate') {
+    // 3. DİĞER SİNYALLER (Offer/Answer)
+    else if (['offer', 'answer', 'candidate'].includes(data.type)) {
         const targetClient = users[data.to];
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
             targetClient.send(message);
+            // Sinyal loglarını kalabalık etmemek için yazmıyoruz
         }
     }
-  });
+});
 
   ws.on('close', function() {
       if (ws.userId) {
           delete users[ws.userId];
-          console.log("Kullanıcı Ayrıldı: " + ws.userId);
+          console.log("🔻 ÇIKIŞ: " + ws.userId + " ayrıldı.");
       }
+  });
+  
+  ws.on('error', function(error) {
+      console.log("⚠️ HATA: Socket hatası: " + error);
   });
 });
