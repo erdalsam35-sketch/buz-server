@@ -1,74 +1,95 @@
 const WebSocket = require('ws');
-
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("🔥 BUZ Sunucusu (Akıllı Harf Düzeltme Modu) Çalışıyor...");
+console.log("🔥 BUZ Grup Telsiz Sunucusu Çalışıyor...");
 
-let users = {};
+// Kullanıcılar ve Gruplar
+let users = {}; // { "USER_ID": ws }
+let groups = {}; // { "GRUP_ADI": ["USER_ID_1", "USER_ID_2"] }
 
 wss.on('connection', function connection(ws) {
   
-  // Bağlantı kopmasın diye kalp atışı
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', function incoming(message) {
     let data;
-    try {
-        data = JSON.parse(message);
-    } catch (e) { return; }
-
-    // --- KRİTİK DÜZELTME: HER ŞEYİ BÜYÜK HARFE ÇEVİR ---
-    // Gelen ID ne olursa olsun (buz, BuZ, bUz) hepsini BUZ yapar.
-    if (data.userId) data.userId = data.userId.trim().toUpperCase();
-    if (data.to) data.to = data.to.trim().toUpperCase();
-    if (data.from) data.from = data.from.trim().toUpperCase();
-    // ----------------------------------------------------
+    try { data = JSON.parse(message); } catch (e) { return; }
 
     // 1. GİRİŞ (LOGIN)
     if (data.type === 'login') {
-        users[data.userId] = ws;
-        ws.userId = data.userId;
-        
-        console.log("✅ GİRİŞ: [" + data.userId + "]");
-        printOnlineUsers(); 
+        const userId = data.userId.trim().toUpperCase();
+        users[userId] = ws;
+        ws.userId = userId;
+        console.log("✅ GİRİŞ: " + userId);
     } 
     
-    // 2. SES GÖNDERİMİ
+    // 2. GRUBA KATILMA (YENİ ÖZELLİK)
+    else if (data.type === 'join_group') {
+        const userId = data.userId.trim().toUpperCase();
+        const groupName = data.groupName.trim().toUpperCase();
+        
+        // Eğer grup yoksa oluştur
+        if (!groups[groupName]) {
+            groups[groupName] = [];
+        }
+        
+        // Kullanıcı zaten grupta değilse ekle
+        if (!groups[groupName].includes(userId)) {
+            groups[groupName].push(userId);
+        }
+        
+        // Kullanıcının aktif grubunu socket'e kaydet
+        ws.currentGroup = groupName;
+        
+        console.log("📢 GRUP: [" + userId + "] --> [" + groupName + "] kanalına katıldı.");
+        console.log("   👥 Gruptakiler: " + groups[groupName].join(", "));
+    }
+
+    // 3. SES GÖNDERİMİ (HERKESE DAĞIT)
     else if (data.type === 'audio_msg') {
-        console.log("📨 MESAJ: [" + data.from + "] --> [" + data.to + "]");
+        const groupName = data.to.trim().toUpperCase(); // Hedef artık bir Grup Adı
+        const senderId = data.from.trim().toUpperCase();
         
-        const targetClient = users[data.to];
-        
-        if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-            // Mesajı hedefe ilet (Veriyi string olarak tekrar paketle)
-            targetClient.send(JSON.stringify(data));
-            console.log("🚀 BAŞARILI: İletildi.");
+        console.log("aaa SES YAYINI: [" + groupName + "] kanalına...");
+
+        if (groups[groupName]) {
+            // Gruptaki herkesi döngüye al
+            groups[groupName].forEach(memberId => {
+                // Gönderen kişinin kendisine geri yollama!
+                if (memberId !== senderId) {
+                    const targetClient = users[memberId];
+                    if (targetClient && targetClient.readyState === WebSocket.OPEN) {
+                        targetClient.send(message);
+                    }
+                }
+            });
+            console.log("🚀 YAYIN YAPILDI (" + (groups[groupName].length - 1) + " kişiye).");
         } else {
-            console.log("⛔ HATA: Hedef [" + data.to + "] bulunamadı!");
-            printOnlineUsers(); // Listeyi göster ki hatayı görelim
+            console.log("⛔ GRUP BULUNAMADIveya BOŞ.");
         }
     }
     
-    // 3. PING (Boş geç)
+    // 4. PING
     else if (data.type === 'ping') { }
   });
 
+  // KOPMA DURUMU
   ws.on('close', function() {
       if (ws.userId) {
+          // Kullanıcıyı genel listeden sil
           delete users[ws.userId];
-          console.log("🔻 KOPTU: [" + ws.userId + "]");
+          
+          // Kullanıcıyı bulunduğu gruptan da çıkar
+          if (ws.currentGroup && groups[ws.currentGroup]) {
+              groups[ws.currentGroup] = groups[ws.currentGroup].filter(id => id !== ws.userId);
+          }
+          console.log("🔻 ÇIKIŞ: " + ws.userId);
       }
   });
 });
 
-function printOnlineUsers() {
-    const onlineList = Object.keys(users);
-    console.log("📋 ONLİNE LİSTESİ: " + onlineList.join(", "));
-    console.log("------------------------------------------------");
-}
-
-// 30 saniyede bir ölü bağlantıları temizle
+// Keep-Alive
 setInterval(function ping() {
   wss.clients.forEach(function each(ws) {
     if (ws.isAlive === false) return ws.terminate();
