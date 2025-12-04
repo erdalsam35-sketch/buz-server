@@ -2,9 +2,8 @@ const WebSocket = require('ws');
 
 const wss = new WebSocket.Server({ port: 8080 });
 
-console.log("🔍 DETAYLI LOG SUNUCUSU ÇALIŞIYOR...");
+console.log("🔥 BUZ Sunucusu (Akıllı Harf Düzeltme Modu) Çalışıyor...");
 
-// Kullanıcı Listesi
 let users = {};
 
 wss.on('connection', function connection(ws) {
@@ -19,38 +18,40 @@ wss.on('connection', function connection(ws) {
         data = JSON.parse(message);
     } catch (e) { return; }
 
-    // --- GİRİŞ (LOGIN) ---
+    // --- KRİTİK DÜZELTME: HER ŞEYİ BÜYÜK HARFE ÇEVİR ---
+    // Gelen ID ne olursa olsun (buz, BuZ, bUz) hepsini BUZ yapar.
+    if (data.userId) data.userId = data.userId.trim().toUpperCase();
+    if (data.to) data.to = data.to.trim().toUpperCase();
+    if (data.from) data.from = data.from.trim().toUpperCase();
+    // ----------------------------------------------------
+
+    // 1. GİRİŞ (LOGIN)
     if (data.type === 'login') {
-        // ID'leri temizle (Boşlukları sil)
-        const cleanId = data.userId.trim();
-        users[cleanId] = ws;
-        ws.userId = cleanId;
+        users[data.userId] = ws;
+        ws.userId = data.userId;
         
-        console.log("✅ GİRİŞ YAPILDI: [" + cleanId + "]");
-        printOnlineUsers(); // Listeyi ekrana bas
+        console.log("✅ GİRİŞ: [" + data.userId + "]");
+        printOnlineUsers(); 
     } 
     
-    // --- SES GÖNDERİMİ ---
+    // 2. SES GÖNDERİMİ
     else if (data.type === 'audio_msg') {
-        const targetId = data.to.trim();
-        console.log("📨 MESAJ İSTEĞİ: [" + data.from + "] --> [" + targetId + "]");
+        console.log("📨 MESAJ: [" + data.from + "] --> [" + data.to + "]");
         
-        const targetClient = users[targetId];
+        const targetClient = users[data.to];
         
         if (targetClient && targetClient.readyState === WebSocket.OPEN) {
-            targetClient.send(message);
-            console.log("🚀 BAŞARILI: Paket hedefe teslim edildi.");
+            // Mesajı hedefe ilet (Veriyi string olarak tekrar paketle)
+            targetClient.send(JSON.stringify(data));
+            console.log("🚀 BAŞARILI: İletildi.");
         } else {
-            console.log("⛔ HATA: Hedef [" + targetId + "] bulunamadı!");
-            console.log("   👉 İPUCU: Hedef telefonun interneti kopmuş veya ID yanlış.");
-            printOnlineUsers(); // Kimlerin online olduğunu göster ki hatanı anla
+            console.log("⛔ HATA: Hedef [" + data.to + "] bulunamadı!");
+            printOnlineUsers(); // Listeyi göster ki hatayı görelim
         }
     }
     
-    // --- PING ---
-    else if (data.type === 'ping') {
-        // Pingleri loglayıp ekranı kirletmeyelim
-    }
+    // 3. PING (Boş geç)
+    else if (data.type === 'ping') { }
   });
 
   ws.on('close', function() {
@@ -61,10 +62,9 @@ wss.on('connection', function connection(ws) {
   });
 });
 
-// Yardımcı Fonksiyon: Online Listesini Yazdır
 function printOnlineUsers() {
     const onlineList = Object.keys(users);
-    console.log("📋 ŞU AN ONLİNE OLANLAR (" + onlineList.length + "): " + onlineList.join(", "));
+    console.log("📋 ONLİNE LİSTESİ: " + onlineList.join(", "));
     console.log("------------------------------------------------");
 }
 
