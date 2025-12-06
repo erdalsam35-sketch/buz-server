@@ -1,20 +1,19 @@
 // server.js
-// BUZ Server - FINAL STABLE v3.0
-// Özellikler: Grup Desteği, Parçalı Yükleme (Chunking), Ping/Pong, Render Uyumu
+// BUZ Server - COMPLETE FIXED v4 (Deprecation Fixed)
+// Node 18+ recommended
 
 const http = require('http');
 const WebSocket = require('ws');
-const url = require('url');
 const crypto = require('crypto');
 
-// AYARLAR (Render.com otomatik port atar, yoksa 10000 kullanır)
+// AYARLAR (Render.com portu veya varsayılan)
 const PORT = parseInt(process.env.PORT || '10000', 10);
-const WS_PATH = process.env.WS_PATH || '/ws'; // Android'de wss://.../ws kullanmalısınız!
-const PING_INTERVAL_MS = parseInt(process.env.PING_INTERVAL_MS || '30000', 10); // 30 sn
-const MAX_MESSAGE_BYTES = parseInt(process.env.MAX_MESSAGE_BYTES || String(5_000_000), 10); // 5MB Limit
-const CHUNK_TIMEOUT_MS = parseInt(process.env.CHUNK_TIMEOUT_MS || '30000', 10); // 30 sn zaman aşımı
+const WS_PATH = process.env.WS_PATH || '/ws';
+const PING_INTERVAL_MS = parseInt(process.env.PING_INTERVAL_MS || '30000', 10);
+const MAX_MESSAGE_BYTES = parseInt(process.env.MAX_MESSAGE_BYTES || String(5_000_000), 10); // 5MB
+const CHUNK_TIMEOUT_MS = parseInt(process.env.CHUNK_TIMEOUT_MS || '30000', 10); 
 
-// HAFIZA (Veritabanı yerine RAM kullanılır)
+// HAFIZA
 const users = new Map();   // { userId: Set<ws> }
 const groups = new Map();  // { groupName: Set<userId> }
 const chunkUploads = new Map(); // Parçalı yüklemeler
@@ -27,7 +26,7 @@ function safeSend(ws, obj) {
       ws.send(JSON.stringify(obj));
     }
   } catch (e) {
-    console.warn('Mesaj gönderme hatası:', e);
+    console.warn('safeSend hatası:', e);
   }
 }
 
@@ -82,15 +81,13 @@ function removeUserFromGroup(groupName, userId) {
   if (set.size === 0) groups.delete(groupName);
 }
 
-// --- PARÇALI YÜKLEME (CHUNKING) MANTIĞI ---
+// --- PARÇALI YÜKLEME (CHUNKING) ---
 
 function startChunkUpload(uploadId, total) {
   const parts = new Map();
   const obj = { total, receivedCount: 0, parts, timer: null };
   
-  // Zaman aşımı temizliği
   obj.timer = setTimeout(() => {
-    console.warn(`Upload zaman aşımı: ${uploadId}`);
     chunkUploads.delete(uploadId);
   }, CHUNK_TIMEOUT_MS);
   
@@ -106,7 +103,6 @@ function addChunkPart(uploadId, index, dataBuffer) {
     entry.receivedCount++;
   }
   
-  // Zamanlayıcıyı sıfırla
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
     chunkUploads.delete(uploadId);
@@ -122,7 +118,7 @@ function assembleChunks(uploadId) {
   const buffers = [];
   for (let i = 0; i < entry.total; i++) {
     const part = entry.parts.get(i);
-    if (!part) return null; // Eksik parça var
+    if (!part) return null;
     buffers.push(part);
   }
   
@@ -136,16 +132,18 @@ function assembleChunks(uploadId) {
 
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('BUZ WebSocket Sunucusu Calisiyor\n');
+  res.end('BUZ WebSocket Sunucusu Calisiyor (v4)\n');
 });
 
 const wss = new WebSocket.Server({ noServer: true });
 
-// HTTP Upgrade (ws:// adresini WebSocket'e çevirir)
+// HTTP Upgrade (Düzeltilen Kısım Burası)
 server.on('upgrade', function upgrade(request, socket, head) {
-  const { pathname } = url.parse(request.url);
+  // MODERN URL PARSING (Warning Çözümü)
+  // Gelen istek relative olduğu için dummy bir base ekliyoruz.
+  const parsedUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
+  const pathname = parsedUrl.pathname;
   
-  // Sadece /ws yolundan gelenleri kabul et
   if (pathname === WS_PATH) {
     wss.handleUpgrade(request, socket, head, function done(ws) {
       wss.emit('connection', ws, request);
@@ -155,7 +153,7 @@ server.on('upgrade', function upgrade(request, socket, head) {
   }
 });
 
-// Otomatik Ping (Bağlantı Canlı Tutma)
+// Otomatik Ping
 function noop() {}
 const interval = setInterval(() => {
   wss.clients.forEach(ws => {
@@ -171,30 +169,26 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.userId = null;
   ws.currentGroup = null;
-  ws.id = crypto.randomBytes(4).toString('hex'); // Rastgele bağlantı ID
+  ws.id = crypto.randomBytes(4).toString('hex');
 
   ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     try {
-      // 1. Boyut Kontrolü
       let byteLen = Buffer.isBuffer(raw) ? raw.length : Buffer.byteLength(raw, 'utf8');
       if (byteLen > MAX_MESSAGE_BYTES) {
         safeSend(ws, { type: 'error', reason: 'message_too_large' });
         return;
       }
 
-      // 2. JSON Çözme
       const text = raw.toString();
       let data;
       try { data = JSON.parse(text); } catch (e) { return; }
 
       if (!data || !data.type) return;
 
-      // 3. İşlem Türleri
       switch (data.type) {
         
-        // GİRİŞ
         case 'login': {
           const userId = (data.userId || '').toString().trim().toUpperCase();
           if (!userId) return;
@@ -205,13 +199,11 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // GRUBA KATIL
         case 'join_group': {
           if (!ws.userId) return;
           const groupName = (data.groupName || '').toString().trim().toUpperCase();
           if (!groupName) return;
 
-          // Eski gruptan çık
           if (ws.currentGroup && ws.currentGroup !== groupName) {
             removeUserFromGroup(ws.currentGroup, ws.userId);
           }
@@ -223,28 +215,24 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // TEK SEFERDE SES MESAJI
         case 'audio_msg': {
           if (!ws.userId) return;
           const groupName = (data.to || ws.currentGroup || '').toString().trim().toUpperCase();
-          
           if (!groupName) return;
 
           const payload = {
             type: 'audio_msg',
             from: ws.userId,
             groupName,
-            data: data.data, // Base64
+            data: data.data,
             timestamp: Date.now()
           };
 
-          // Gruba dağıt (Gönderen hariç)
           const sent = broadcastToGroup(groupName, payload, { excludeUserId: ws.userId });
           console.log(`🎤 SES: ${ws.userId} -> ${groupName} (${sent} kişiye)`);
           break;
         }
 
-        // PARÇALI YÜKLEME BAŞLAT
         case 'audio_chunk_start': {
           if (!ws.userId) return;
           const uploadId = (data.uploadId || '').toString();
@@ -256,7 +244,6 @@ wss.on('connection', (ws, req) => {
           break;
         }
 
-        // PARÇA AL
         case 'audio_chunk': {
           if (!ws.userId) return;
           const uploadId = (data.uploadId || '').toString();
@@ -264,15 +251,12 @@ wss.on('connection', (ws, req) => {
           const base64 = data.data;
           
           if (uploadId && base64) {
-            // Parçayı ekle
-            if (!chunkUploads.has(uploadId)) return; // Zaman aşımına uğramış olabilir
+            if (!chunkUploads.has(uploadId)) return;
             
             const buffer = Buffer.from(base64, 'base64');
             const finished = addChunkPart(uploadId, index, buffer);
-            
             safeSend(ws, { type: 'chunk_ack', uploadId, index });
 
-            // Hepsi tamamlandıysa birleştir ve gönder
             if (finished) {
               const combined = assembleChunks(uploadId);
               if (combined) {
@@ -288,14 +272,13 @@ wss.on('connection', (ws, req) => {
                 };
                 
                 const sent = broadcastToGroup(groupName, payload, { excludeUserId: ws.userId });
-                console.log(`📦 DOSYA BİRLEŞTİ VE GÖNDERİLDİ: ${groupName} (${sent} kişiye)`);
+                console.log(`📦 CHUNK TAMAMLANDI VE GÖNDERİLDİ: ${groupName} (${sent} kişiye)`);
               }
             }
           }
           break;
         }
 
-        // PING (Android'den gelen)
         case 'ping': {
           safeSend(ws, { type: 'pong' });
           break;
@@ -307,7 +290,6 @@ wss.on('connection', (ws, req) => {
     }
   });
 
-  // KOPMA
   ws.on('close', () => {
     if (ws.userId) {
       removeUserConnection(ws.userId, ws);
@@ -323,7 +305,6 @@ wss.on('connection', (ws, req) => {
 
 wss.on('close', () => clearInterval(interval));
 
-// SUNUCUYU BAŞLAT
 server.listen(PORT, () => {
-  console.log(`✅ Sunucu Port ${PORT} üzerinde çalışıyor. Yol: ${WS_PATH}`);
+  console.log(`✅ BUZ Server V4 (Modern URL) çalışıyor. Port: ${PORT}`);
 });
