@@ -1,24 +1,25 @@
+// server.js
+// BUZ Server - FINAL STABLE v3.0
+// Özellikler: Grup Desteği, Parçalı Yükleme (Chunking), Ping/Pong, Render Uyumu
+
 const http = require('http');
 const WebSocket = require('ws');
 const url = require('url');
 const crypto = require('crypto');
 
-// CONFIG (env override)
+// AYARLAR (Render.com otomatik port atar, yoksa 10000 kullanır)
 const PORT = parseInt(process.env.PORT || '10000', 10);
-const WS_PATH = process.env.WS_PATH || '/ws';
-const ENABLE_ECHO = (process.env.ENABLE_ECHO === 'true') || false;
-const PING_INTERVAL_MS = parseInt(process.env.PING_INTERVAL_MS || '30000', 10);
-const MAX_MESSAGE_BYTES = parseInt(process.env.MAX_MESSAGE_BYTES || String(1_500_000), 10); // ~1.5MB
-const CHUNK_TIMEOUT_MS = parseInt(process.env.CHUNK_TIMEOUT_MS || '30000', 10); // 30s timeout for chunked uploads
+const WS_PATH = process.env.WS_PATH || '/ws'; // Android'de wss://.../ws kullanmalısınız!
+const PING_INTERVAL_MS = parseInt(process.env.PING_INTERVAL_MS || '30000', 10); // 30 sn
+const MAX_MESSAGE_BYTES = parseInt(process.env.MAX_MESSAGE_BYTES || String(5_000_000), 10); // 5MB Limit
+const CHUNK_TIMEOUT_MS = parseInt(process.env.CHUNK_TIMEOUT_MS || '30000', 10); // 30 sn zaman aşımı
 
-// In-memory stores
-// users: Map<userId, Set<ws>>
-const users = new Map();
-// groups: Map<groupName, Set<userId>>
-const groups = new Map();
+// HAFIZA (Veritabanı yerine RAM kullanılır)
+const users = new Map();   // { userId: Set<ws> }
+const groups = new Map();  // { groupName: Set<userId> }
+const chunkUploads = new Map(); // Parçalı yüklemeler
 
-// chunkUploads: Map<uploadId, {total, receivedCount, parts: Map<index, Buffer>, timer}>
-const chunkUploads = new Map();
+// --- YARDIMCI FONKSİYONLAR ---
 
 function safeSend(ws, obj) {
   try {
@@ -26,18 +27,21 @@ function safeSend(ws, obj) {
       ws.send(JSON.stringify(obj));
     }
   } catch (e) {
-    console.warn('safeSend failed', e);
+    console.warn('Mesaj gönderme hatası:', e);
   }
 }
 
-function broadcastToGroup(groupName, messageObj, { excludeUserId = null, includeSender = false } = {}) {
+function broadcastToGroup(groupName, messageObj, { excludeUserId = null } = {}) {
   const memberSet = groups.get(groupName);
   if (!memberSet) return 0;
+  
   let sent = 0;
   for (const memberId of memberSet) {
-    if (!includeSender && memberId === excludeUserId) continue;
+    if (memberId === excludeUserId) continue; // Gönderene geri yollama
+    
     const conns = users.get(memberId);
     if (!conns) continue;
+    
     for (const clientWs of conns) {
       safeSend(clientWs, messageObj);
       sent++;
@@ -78,36 +82,33 @@ function removeUserFromGroup(groupName, userId) {
   if (set.size === 0) groups.delete(groupName);
 }
 
-function sendUserStatus(userId, isOnline) {
-  const payload = { type: 'user_status', userId, isOnline };
-  for (const conns of users.values()) {
-    for (const ws of conns) safeSend(ws, payload);
-  }
-}
+// --- PARÇALI YÜKLEME (CHUNKING) MANTIĞI ---
 
-// chunk handling
 function startChunkUpload(uploadId, total) {
   const parts = new Map();
   const obj = { total, receivedCount: 0, parts, timer: null };
-  // timeout cleanup
+  
+  // Zaman aşımı temizliği
   obj.timer = setTimeout(() => {
-    console.warn(`Chunk upload ${uploadId} timed out, clearing`);
+    console.warn(`Upload zaman aşımı: ${uploadId}`);
     chunkUploads.delete(uploadId);
   }, CHUNK_TIMEOUT_MS);
+  
   chunkUploads.set(uploadId, obj);
 }
 
 function addChunkPart(uploadId, index, dataBuffer) {
   const entry = chunkUploads.get(uploadId);
   if (!entry) return false;
+  
   if (!entry.parts.has(index)) {
     entry.parts.set(index, dataBuffer);
     entry.receivedCount++;
   }
-  // reset timer
+  
+  // Zamanlayıcıyı sıfırla
   clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
-    console.warn(`Chunk upload ${uploadId} timed out (reset), clearing`);
     chunkUploads.delete(uploadId);
   }, CHUNK_TIMEOUT_MS);
 
@@ -117,34 +118,34 @@ function addChunkPart(uploadId, index, dataBuffer) {
 function assembleChunks(uploadId) {
   const entry = chunkUploads.get(uploadId);
   if (!entry) return null;
-  const total = entry.total;
-  const parts = entry.parts;
+  
   const buffers = [];
-  for (let i = 0; i < total; i++) {
-    const part = parts.get(i);
-    if (!part) {
-      console.warn(`Missing chunk ${i} for upload ${uploadId}`);
-      return null;
-    }
+  for (let i = 0; i < entry.total; i++) {
+    const part = entry.parts.get(i);
+    if (!part) return null; // Eksik parça var
     buffers.push(part);
   }
+  
   const combined = Buffer.concat(buffers);
-  // cleanup
   clearTimeout(entry.timer);
   chunkUploads.delete(uploadId);
   return combined;
 }
 
-// HTTP server + upgrade handling
+// --- SUNUCU BAŞLATMA ---
+
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end('BUZ WebSocket Server\n');
+  res.end('BUZ WebSocket Sunucusu Calisiyor\n');
 });
 
 const wss = new WebSocket.Server({ noServer: true });
 
+// HTTP Upgrade (ws:// adresini WebSocket'e çevirir)
 server.on('upgrade', function upgrade(request, socket, head) {
   const { pathname } = url.parse(request.url);
+  
+  // Sadece /ws yolundan gelenleri kabul et
   if (pathname === WS_PATH) {
     wss.handleUpgrade(request, socket, head, function done(ws) {
       wss.emit('connection', ws, request);
@@ -154,7 +155,7 @@ server.on('upgrade', function upgrade(request, socket, head) {
   }
 });
 
-// heartbeat
+// Otomatik Ping (Bağlantı Canlı Tutma)
 function noop() {}
 const interval = setInterval(() => {
   wss.clients.forEach(ws => {
@@ -164,216 +165,165 @@ const interval = setInterval(() => {
   });
 }, PING_INTERVAL_MS);
 
+// --- BAĞLANTI OLAYLARI ---
+
 wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.userId = null;
   ws.currentGroup = null;
-  ws.id = crypto.randomBytes(6).toString('hex');
+  ws.id = crypto.randomBytes(4).toString('hex'); // Rastgele bağlantı ID
 
-  ws.on('pong', () => {
-    ws.isAlive = true;
-  });
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     try {
-      // size check
-      let byteLen = 0;
-      if (typeof raw === 'string') byteLen = Buffer.byteLength(raw, 'utf8');
-      else if (Buffer.isBuffer(raw)) byteLen = raw.length;
+      // 1. Boyut Kontrolü
+      let byteLen = Buffer.isBuffer(raw) ? raw.length : Buffer.byteLength(raw, 'utf8');
       if (byteLen > MAX_MESSAGE_BYTES) {
         safeSend(ws, { type: 'error', reason: 'message_too_large' });
         return;
       }
 
+      // 2. JSON Çözme
       const text = raw.toString();
       let data;
-      try { data = JSON.parse(text); } catch (e) {
-        safeSend(ws, { type: 'error', reason: 'invalid_json' });
-        return;
-      }
+      try { data = JSON.parse(text); } catch (e) { return; }
 
-      if (!data || typeof data.type !== 'string') {
-        safeSend(ws, { type: 'error', reason: 'invalid_payload' });
-        return;
-      }
+      if (!data || !data.type) return;
 
+      // 3. İşlem Türleri
       switch (data.type) {
+        
+        // GİRİŞ
         case 'login': {
           const userId = (data.userId || '').toString().trim().toUpperCase();
-          if (!userId) { safeSend(ws, { type: 'error', reason: 'missing_userId' }); return; }
+          if (!userId) return;
           ws.userId = userId;
           addUserConnection(userId, ws);
           safeSend(ws, { type: 'login_ack', userId });
-          sendUserStatus(userId, true);
-          console.log(`LOGIN: ${userId} [conn:${ws.id}]`);
+          console.log(`✅ GİRİŞ: ${userId}`);
           break;
         }
 
+        // GRUBA KATIL
         case 'join_group': {
-          if (!ws.userId) { safeSend(ws, { type: 'error', reason: 'not_logged_in' }); return; }
+          if (!ws.userId) return;
           const groupName = (data.groupName || '').toString().trim().toUpperCase();
-          if (!groupName) { safeSend(ws, { type: 'error', reason: 'missing_groupName' }); return; }
+          if (!groupName) return;
 
+          // Eski gruptan çık
           if (ws.currentGroup && ws.currentGroup !== groupName) {
             removeUserFromGroup(ws.currentGroup, ws.userId);
-            // notify old group
-            broadcastToGroup(ws.currentGroup, { type: 'user_left', userId: ws.userId, groupName: ws.currentGroup }, { includeSender: true });
           }
 
           addUserToGroup(groupName, ws.userId);
           ws.currentGroup = groupName;
-          safeSend(ws, { type: 'join_ack', groupName });
-          broadcastToGroup(groupName, { type: 'user_joined', userId: ws.userId, groupName }, { includeSender: true });
-          console.log(`JOIN: ${ws.userId} -> ${groupName}`);
+          
+          console.log(`➕ KANAL: ${ws.userId} -> ${groupName}`);
           break;
         }
 
-        case 'leave_group': {
-          if (!ws.userId) { safeSend(ws, { type: 'error', reason: 'not_logged_in' }); return; }
-          const groupName = (data.groupName || ws.currentGroup || '').toString().trim().toUpperCase();
-          if (!groupName) { safeSend(ws, { type: 'error', reason: 'missing_groupName' }); return; }
-          removeUserFromGroup(groupName, ws.userId);
-          if (ws.currentGroup === groupName) ws.currentGroup = null;
-          safeSend(ws, { type: 'leave_ack', groupName });
-          broadcastToGroup(groupName, { type: 'user_left', userId: ws.userId, groupName }, { includeSender: true });
-          console.log(`LEAVE: ${ws.userId} -/-> ${groupName}`);
-          break;
-        }
-
+        // TEK SEFERDE SES MESAJI
         case 'audio_msg': {
-          if (!ws.userId) { safeSend(ws, { type: 'error', reason: 'not_logged_in' }); return; }
-          const groupName = (data.to || data.groupName || data.channel || '').toString().trim().toUpperCase();
-          if (!groupName) { safeSend(ws, { type: 'error', reason: 'missing_target_group' }); return; }
-
-          const base64 = data.data;
-          if (!base64 || typeof base64 !== 'string' || base64.length < 10) {
-            safeSend(ws, { type: 'error', reason: 'invalid_audio_payload' });
-            return;
-          }
+          if (!ws.userId) return;
+          const groupName = (data.to || ws.currentGroup || '').toString().trim().toUpperCase();
+          
+          if (!groupName) return;
 
           const payload = {
             type: 'audio_msg',
             from: ws.userId,
             groupName,
-            data: base64,
+            data: data.data, // Base64
             timestamp: Date.now()
           };
 
-          const sent = broadcastToGroup(groupName, payload, { excludeUserId: ws.userId, includeSender: ENABLE_ECHO });
-          safeSend(ws, { type: 'audio_ack', groupName, recipients: sent });
-          console.log(`AUDIO: ${ws.userId} -> ${groupName} | sent: ${sent}`);
+          // Gruba dağıt (Gönderen hariç)
+          const sent = broadcastToGroup(groupName, payload, { excludeUserId: ws.userId });
+          console.log(`🎤 SES: ${ws.userId} -> ${groupName} (${sent} kişiye)`);
           break;
         }
 
-        // Chunked upload protocol
-        // client sends initial "audio_chunk_start" with uploadId and total
+        // PARÇALI YÜKLEME BAŞLAT
         case 'audio_chunk_start': {
-          if (!ws.userId) { safeSend(ws, { type: 'error', reason: 'not_logged_in' }); return; }
+          if (!ws.userId) return;
           const uploadId = (data.uploadId || '').toString();
           const total = parseInt(data.total, 10);
-          if (!uploadId || !Number.isInteger(total) || total <= 0) {
-            safeSend(ws, { type: 'error', reason: 'invalid_chunk_start' });
-            return;
+          if (uploadId && total > 0) {
+            startChunkUpload(uploadId, total);
+            safeSend(ws, { type: 'chunk_start_ack', uploadId });
           }
-          startChunkUpload(uploadId, total);
-          safeSend(ws, { type: 'chunk_start_ack', uploadId });
-          console.log(`CHUNK START: ${uploadId} total=${total}`);
           break;
         }
 
-        // client sends "audio_chunk" messages: uploadId, index (0-based), data (base64)
+        // PARÇA AL
         case 'audio_chunk': {
-          if (!ws.userId) { safeSend(ws, { type: 'error', reason: 'not_logged_in' }); return; }
+          if (!ws.userId) return;
           const uploadId = (data.uploadId || '').toString();
           const index = parseInt(data.index, 10);
-          const total = parseInt(data.total, 10);
           const base64 = data.data;
-          const toGroup = (data.to || data.groupName || '').toString().trim().toUpperCase();
+          
+          if (uploadId && base64) {
+            // Parçayı ekle
+            if (!chunkUploads.has(uploadId)) return; // Zaman aşımına uğramış olabilir
+            
+            const buffer = Buffer.from(base64, 'base64');
+            const finished = addChunkPart(uploadId, index, buffer);
+            
+            safeSend(ws, { type: 'chunk_ack', uploadId, index });
 
-          if (!uploadId || !Number.isInteger(index) || !Number.isInteger(total) || !base64) {
-            safeSend(ws, { type: 'error', reason: 'invalid_chunk' });
-            return;
-          }
-
-          // ensure upload exists (or create)
-          if (!chunkUploads.has(uploadId)) startChunkUpload(uploadId, total);
-
-          const buffer = Buffer.from(base64, 'base64');
-          const finished = addChunkPart(uploadId, index, buffer);
-
-          safeSend(ws, { type: 'chunk_ack', uploadId, index });
-
-          if (finished) {
-            const combined = assembleChunks(uploadId);
-            if (!combined) {
-              safeSend(ws, { type: 'error', reason: 'assemble_failed', uploadId });
-              return;
+            // Hepsi tamamlandıysa birleştir ve gönder
+            if (finished) {
+              const combined = assembleChunks(uploadId);
+              if (combined) {
+                const combinedBase64 = combined.toString('base64');
+                const groupName = (data.to || ws.currentGroup || '').toString().trim().toUpperCase();
+                
+                const payload = {
+                  type: 'audio_msg',
+                  from: ws.userId,
+                  groupName,
+                  data: combinedBase64,
+                  timestamp: Date.now()
+                };
+                
+                const sent = broadcastToGroup(groupName, payload, { excludeUserId: ws.userId });
+                console.log(`📦 DOSYA BİRLEŞTİ VE GÖNDERİLDİ: ${groupName} (${sent} kişiye)`);
+              }
             }
-
-            // convert combined buffer to base64 and broadcast
-            const combinedBase64 = combined.toString('base64');
-            const payload = {
-              type: 'audio_msg',
-              from: ws.userId,
-              groupName: toGroup || ws.currentGroup,
-              data: combinedBase64,
-              timestamp: Date.now()
-            };
-
-            const sent = broadcastToGroup(payload.groupName, payload, { excludeUserId: ws.userId, includeSender: ENABLE_ECHO });
-            safeSend(ws, { type: 'audio_ack', uploadId, recipients: sent });
-            console.log(`CHUNK FINISHED: ${uploadId} -> ${payload.groupName} sent:${sent}`);
           }
           break;
         }
 
+        // PING (Android'den gelen)
         case 'ping': {
-          safeSend(ws, { type: 'pong', timestamp: Date.now() });
+          safeSend(ws, { type: 'pong' });
           break;
         }
-
-        default:
-          safeSend(ws, { type: 'error', reason: 'unknown_type' });
-          break;
       }
 
     } catch (err) {
-      console.warn('message handling error', err);
-      safeSend(ws, { type: 'error', reason: 'server_error' });
+      console.warn('Hata:', err);
     }
   });
 
+  // KOPMA
   ws.on('close', () => {
-    try {
-      const u = ws.userId;
-      if (u) {
-        removeUserConnection(u, ws);
-        // remove from groups
-        if (ws.currentGroup) {
-          removeUserFromGroup(ws.currentGroup, u);
-          broadcastToGroup(ws.currentGroup, { type: 'user_left', userId: u, groupName: ws.currentGroup }, { includeSender: true });
-        }
-        // if no more connections for that user, broadcast offline
-        if (!users.has(u)) {
-          sendUserStatus(u, false);
-          console.log(`OFFLINE: ${u}`);
-        }
+    if (ws.userId) {
+      removeUserConnection(ws.userId, ws);
+      if (ws.currentGroup) {
+        removeUserFromGroup(ws.currentGroup, ws.userId);
       }
-    } catch (e) {
-      console.warn('error on close cleanup', e);
+      console.log(`🔻 ÇIKIŞ: ${ws.userId}`);
     }
   });
 
-  ws.on('error', (e) => {
-    console.warn('ws error', e);
-  });
+  ws.on('error', (e) => console.warn('Socket hatası', e));
 });
 
-wss.on('close', () => {
-  clearInterval(interval);
-});
+wss.on('close', () => clearInterval(interval));
 
-// start server
+// SUNUCUYU BAŞLAT
 server.listen(PORT, () => {
-  console.log(`🔥 BUZ Server listening on port ${PORT}, ws_path=${WS_PATH}, echo=${ENABLE_ECHO}`);
+  console.log(`✅ Sunucu Port ${PORT} üzerinde çalışıyor. Yol: ${WS_PATH}`);
 });
